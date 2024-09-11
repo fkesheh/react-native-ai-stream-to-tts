@@ -6,12 +6,20 @@ A proof-of-concept for streaming AI-generated text directly to a Text-to-Speech 
 
 This project is a based on [react-native-tts](https://github.com/ak1394/react-native-tts) with custom modifications to enable real-time streaming of AI-generated text to a TTS engine.
 
+## Demo Video
+
+[Demo Video](demo/video.mp4)
+
 ## Key Features
 
 - Custom Android TTS implementation for direct AI stream to speech conversion (patches/react-native-tts+4.1.1.patch)
 - Integration with AI providers for text generation
 - Real-time text-to-speech conversion as AI generates content
-- TODO: Unmodified iOS implementation (same as the original react-native-tts)
+
+## TODOs
+
+- Check iOS implementation (currently it's the same as the original react-native-tts)
+- Add buffered start to avoid pauses in the beginning of stream playback (currently small buffer was added on react-native side)
 
 ## Getting Started
 
