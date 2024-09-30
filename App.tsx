@@ -1,54 +1,62 @@
-import React, {useState, useEffect, useCallback, useRef} from 'react';
+import React, {useCallback, useEffect, useRef, useState} from 'react';
 import {
-  Button,
-  FlatList,
+  ScrollView,
   StyleSheet,
   Text,
   TextInput,
+  TouchableOpacity,
   View,
 } from 'react-native';
-import Slider from '@react-native-community/slider';
-import Tts from 'react-native-tts';
 import EventSource from 'react-native-sse';
+import Tts from 'react-native-tts';
+import Icon from 'react-native-vector-icons/Feather';
+import Vosk from 'react-native-vosk';
+import {API_KEY, API_URL, MODEL} from '@env';
 
-const bigText =
-  "Hello, welcome to the TTS app! This innovative application harnesses the power of text-to-speech technology to bring your words to life. Whether you're a student looking to listen to study materials, a professional preparing for a presentation, or simply someone who enjoys having text read aloud, our app has you covered. With a wide range of voices and customizable speech settings, you can tailor the experience to your preferences. Explore the various features, adjust the speech rate and pitch, and discover how TTS can enhance your daily routine. Get ready to transform written words into spoken language with just a few taps!";
+console.log('API_KEY', API_KEY);
+console.log('API_URL', API_URL);
+console.log('MODEL', MODEL);
 
-const API_URL = 'https://api.together.xyz/v1/chat/completions';
-// const API_URL = 'https://api.openai.com/v1/chat/completions';
-const API_KEY = '....';  // This is really for testing and POC, not for production
-const MODEL = 'meta-llama/Meta-Llama-3.1-405B-Instruct-Turbo';
-// const MODEL = 'gpt-4o';
-
-const paragraphChunksGenerator = (text: string, wordsPerChunk: number) => {
-  const words = text.split(/\s+/);
-  const chunks = [];
-  for (let i = 0; i < words.length; i += wordsPerChunk) {
-    chunks.push(
-      (i > 0 ? ' ' : '') + words.slice(i, i + wordsPerChunk).join(' '),
-    );
-  }
-  return chunks;
-};
-
-type Voice = {id: string; name: string; language: string};
+type TTSVoiceType = {id: string; name: string; language: string};
 
 const App: React.FC = () => {
-  const [voices, setVoices] = useState<Voice[]>([]);
+
+
+
+  const [voices, setVoices] = useState<TTSVoiceType[]>([]);
   const [ttsStatus, setTtsStatus] = useState<string>('initializing');
   const [selectedVoice, setSelectedVoice] = useState<string | null>(null);
-  const [speechRate, setSpeechRate] = useState<number>(0.5);
-  const [speechPitch, setSpeechPitch] = useState<number>(1);
   const [text, setText] = useState<string>('');
-  const [llmInput, setLlmInput] = useState<string>('Explain quantum computing in simple terms in 5 paragraph');
-  const paragraphBuffer = useRef<string[]>(
-    paragraphChunksGenerator(bigText, 1),
+  const [llmInput, setLlmInput] = useState<string>(
+    'Explain quantum computing in simple terms in 5 paragraph',
   );
+
+  const [_, setReady] = useState<boolean>(false);
+  const [recognizing, setRecognizing] = useState<boolean>(false);
+  const [result, setResult] = useState<string | undefined>();
+  const [isSpeaking, setIsSpeaking] = useState<boolean>(false);
+  const [isProcessing, setIsProcessing] = useState<boolean>(false);
+
+  const vosk = useRef(new Vosk()).current;
+
+  const loadVosk = useCallback(() => {
+    vosk
+      .loadModel('model-en-us')
+      .then(() => setReady(true))
+      .catch((e: Error) => console.error(e));
+  }, [vosk]);
+
+  const unloadVosk = useCallback(() => {
+    vosk.unload();
+    setReady(false);
+    setRecognizing(false);
+  }, [vosk]);
 
   useEffect(() => {
     const initTts = async () => {
-      const result = await Tts.getInitStatus();
-      if (result === 'success') {
+      const resultTTS = await Tts.getInitStatus();
+      console.log('TTS init status: ' + resultTTS);
+      if (resultTTS === 'success') {
         const availableVoices = await Tts.voices();
         const englishVoices = availableVoices
           .filter(v => v.language.includes('en'))
@@ -63,21 +71,10 @@ const App: React.FC = () => {
           await Tts.setDefaultVoice(defaultVoice.id);
         }
 
-        await Tts.setDefaultRate(speechRate);
-        await Tts.setDefaultPitch(speechPitch);
-
         // Add event listeners
-        Tts.addEventListener('tts-start', event => console.log('start', event));
-        Tts.addEventListener('tts-finish', event =>
-          console.log('finish', event),
-        );
-        Tts.addEventListener('tts-cancel', event =>
-          console.log('cancel', event),
-        );
-        Tts.addEventListener('tts-error', event => console.log('error', event));
-        Tts.addEventListener('tts-progress', event =>
-          console.log('progress', event),
-        );
+        Tts.addEventListener('tts-start', () => setIsSpeaking(true));
+        Tts.addEventListener('tts-finish', () => setIsSpeaking(false));
+        Tts.addEventListener('tts-cancel', () => setIsSpeaking(false));
 
         setTtsStatus('initialized');
       } else {
@@ -86,41 +83,52 @@ const App: React.FC = () => {
     };
 
     initTts();
+    loadVosk(); // Auto-load the Vosk model
+
+    const partialResultEvent = vosk.onPartialResult((res: string) => {
+      setResult(res);
+    });
+
+    const finalResultEvent = vosk.onResult(async (res: string) => {
+      try {
+        setResult(res);
+        setLlmInput(res);
+        await stopRecording();
+        await sendToLLM(res);
+      } catch (e) {
+        console.error(e);
+      }
+    });
+
+    const errorEvent = vosk.onError((e: Error) => {
+      console.error(e);
+    });
+
+    const timeoutEvent = vosk.onTimeout(() => {
+      console.log('Recognizer timed out');
+      setRecognizing(false);
+    });
 
     // Cleanup function
     return () => {
       Tts.removeAllListeners('tts-start');
       Tts.removeAllListeners('tts-finish');
       Tts.removeAllListeners('tts-cancel');
-      Tts.removeAllListeners('tts-progress');
-      Tts.removeAllListeners('tts-error');
+      partialResultEvent.remove();
+      finalResultEvent.remove();
+      errorEvent.remove();
+      timeoutEvent.remove();
+      unloadVosk();
     };
-  }, [speechRate, speechPitch]);
-
-  const speak = async () => {
-    for (const paragraph of paragraphBuffer.current) {
-      Tts.speak(paragraph);
-      setText(prevText => prevText + ' ' + paragraph);
-      await new Promise(resolve => setTimeout(resolve, 200));
-    }
-  };
+  }, [vosk, loadVosk, unloadVosk]);
 
   const stop = useCallback(() => {
     Tts.stop();
+    setIsSpeaking(false);
     setText('');
   }, []);
 
-  const setSpeechRateHandler = useCallback(async (rate: number) => {
-    await Tts.setDefaultRate(rate);
-    setSpeechRate(rate);
-  }, []);
-
-  const setSpeechPitchHandler = useCallback(async (pitch: number) => {
-    await Tts.setDefaultPitch(pitch);
-    setSpeechPitch(pitch);
-  }, []);
-
-  const onVoicePress = useCallback(async (voice: Voice) => {
+  const onVoicePress = useCallback(async (voice: TTSVoiceType) => {
     try {
       await Tts.setDefaultLanguage(voice.language);
       await Tts.setDefaultVoice(voice.id);
@@ -130,30 +138,27 @@ const App: React.FC = () => {
     }
   }, []);
 
-  const renderVoiceItem = useCallback(
-    ({item}: {item: Voice}) => (
-      <Button
-        title={`${item.language} - ${item.name || item.id}`}
-        color={selectedVoice === item.id ? undefined : '#969696'}
-        onPress={() => onVoicePress(item)}
-      />
-    ),
-    [selectedVoice, onVoicePress],
-  );
-
-
-  const sendToLLM = async () => {
-
+  const sendToLLM = async (prompt: string) => {
+    console.log('Sending to LLM: ' + prompt);
+    setIsProcessing(true);
     const payload = {
       model: MODEL,
+      max_tokens: 256,
       stream: true,
-      messages: [{ role: 'user', content: llmInput }]
+      messages: [
+        {
+          role: 'system',
+          content:
+            'You are a helpful assistant that can answer questions and help with tasks. Be concise and to the point. Single paragraph response.',
+        },
+        {role: 'user', content: prompt},
+      ],
     };
 
-    const es = new EventSource(API_URL, {
+    const es = new EventSource(API_URL || '', {
       headers: {
         Authorization: `Bearer ${API_KEY}`,
-        'Content-Type': 'application/json'
+        'Content-Type': 'application/json',
       },
       method: 'POST',
       body: JSON.stringify(payload),
@@ -176,15 +181,16 @@ const App: React.FC = () => {
             if (delta?.content) {
               fullText += delta.content;
               setText(prevText => prevText + delta.content);
-              if(streamAudio) {
+              if (streamAudio) {
                 Tts.speak(delta.content);
-              } else if(fullText.split(/\s+/).length > 5) {
+              } else if (fullText.split(/\s+/).length > 5) {
                 Tts.speak(fullText);
                 streamAudio = true;
               }
             }
           }
         } else {
+          setIsProcessing(false);
           console.log('Done. SSE connection closed.');
           es.close();
         }
@@ -202,39 +208,47 @@ const App: React.FC = () => {
     return () => {
       es.removeAllEventListeners();
       es.close();
+      setIsProcessing(false);
     };
   };
 
+  const startRecording = async () => {
+    if (isSpeaking) {
+      stop();
+    }
+    try {
+      await vosk.start({timeout: 60000});
+      setRecognizing(true);
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  const stopRecording = async () => {
+    try {
+      await vosk.stop();
+      setRecognizing(false);
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  const handleMicPress = () => {
+    if (recognizing) {
+      stopRecording();
+    } else if (isSpeaking) {
+      stop();
+    } else {
+      setText('');
+      setLlmInput('');
+      startRecording();
+    }
+  };
+
   return (
-    <View style={styles.container}>
+    <ScrollView contentContainerStyle={styles.container}>
       <Text style={styles.title}>React Native TTS Example</Text>
       <Text style={styles.label}>{`Status: ${ttsStatus}`}</Text>
-
-      <View style={styles.sliderContainer}>
-        <Text style={styles.sliderLabel}>{`Speed: ${speechRate.toFixed(
-          2,
-        )}`}</Text>
-        <Slider
-          style={styles.slider}
-          minimumValue={0.01}
-          maximumValue={0.99}
-          value={speechRate}
-          onSlidingComplete={setSpeechRateHandler}
-        />
-      </View>
-
-      <View style={styles.sliderContainer}>
-        <Text style={styles.sliderLabel}>{`Pitch: ${speechPitch.toFixed(
-          2,
-        )}`}</Text>
-        <Slider
-          style={styles.slider}
-          minimumValue={0.5}
-          maximumValue={2}
-          value={speechPitch}
-          onSlidingComplete={setSpeechPitchHandler}
-        />
-      </View>
 
       <TextInput
         style={styles.textInput}
@@ -245,79 +259,147 @@ const App: React.FC = () => {
 
       <TextInput
         style={styles.llmInput}
-        placeholder="Enter text for LLM"
+        placeholder="Press the microphone to start recording"
         onChangeText={setLlmInput}
         value={llmInput}
       />
 
       <View style={styles.buttonContainer}>
-        <Button title="Speak" onPress={speak} />
-        <Button title="Stop" onPress={stop} />
-        <Button title="Send to LLM" onPress={sendToLLM} />
+        <TouchableOpacity
+          style={[
+            styles.micButton,
+            recognizing && styles.recordingButton,
+            isSpeaking && styles.speakingButton,
+          ]}
+          onPress={handleMicPress}>
+          <Text style={styles.buttonText}>
+            {recognizing ? (
+              <Icon name="mic" size={50} />
+            ) : isSpeaking ? (
+              <Icon name="volume-2" size={50} />
+            ) : isProcessing ? (
+              <Icon name="loader" size={50} />
+            ) : (
+              <Icon name="mic" size={50} />
+            )}
+          </Text>
+        </TouchableOpacity>
       </View>
 
-      <FlatList
-        style={styles.listContainer}
-        keyExtractor={item => item.id}
-        renderItem={renderVoiceItem}
-        extraData={selectedVoice}
-        data={voices}
-      />
-    </View>
+      <Text style={styles.resultText}>Recognized text:</Text>
+      <Text style={styles.resultContent}>{result}</Text>
+
+      <Text style={styles.voiceSelectionTitle}>Available Voices:</Text>
+      {voices.map(voice => (
+        <TouchableOpacity
+          key={voice.id}
+          style={[
+            styles.voiceItem,
+            selectedVoice === voice.id && styles.selectedVoiceItem,
+          ]}
+          onPress={() => onVoicePress(voice)}>
+          <Text style={styles.voiceItemText}>{`${voice.language} - ${
+            voice.name || voice.id
+          }`}</Text>
+        </TouchableOpacity>
+      ))}
+    </ScrollView>
   );
 };
-
 const styles = StyleSheet.create({
   container: {
-    flex: 1,
+    flexGrow: 1,
     justifyContent: 'center',
     alignItems: 'center',
     padding: 20,
   },
   title: {
-    fontSize: 20,
+    fontSize: 24,
     fontWeight: 'bold',
     marginBottom: 20,
+    color: '#333',
   },
   label: {
     textAlign: 'center',
     marginBottom: 10,
-  },
-  sliderContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 10,
-  },
-  sliderLabel: {
-    width: 100,
-  },
-  slider: {
-    flex: 1,
+    fontSize: 16,
+    color: '#666',
   },
   textInput: {
-    borderColor: 'gray',
+    borderColor: '#ccc',
     borderWidth: 1,
+    borderRadius: 5,
     width: '100%',
-    height: '30%',
-    marginBottom: 10,
+    height: 300,
+    marginBottom: 20,
     padding: 10,
+    fontSize: 16,
   },
   llmInput: {
-    borderColor: 'gray',
+    borderColor: '#ccc',
     borderWidth: 1,
+    borderRadius: 5,
     width: '100%',
     height: 40,
-    marginBottom: 10,
+    marginBottom: 20,
     padding: 10,
+    fontSize: 16,
   },
   buttonContainer: {
     flexDirection: 'row',
-    justifyContent: 'space-around',
+    justifyContent: 'center',
     width: '100%',
     marginBottom: 20,
   },
-  listContainer: {
+  micButton: {
+    padding: 15,
+    borderRadius: 50,
+    width: 100,
+    height: 100,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#007AFF',
+  },
+  recordingButton: {
+    backgroundColor: '#FF3B30',
+  },
+  speakingButton: {
+    backgroundColor: '#4CD964',
+  },
+  buttonText: {
+    color: '#fff',
+    fontSize: 50,
+    fontWeight: 'bold',
+  },
+  resultText: {
+    fontSize: 18,
+    fontWeight: 'bold',
+    marginTop: 20,
+    color: '#333',
+  },
+  resultContent: {
+    fontSize: 16,
+    color: '#666',
+  },
+  voiceSelectionTitle: {
+    fontSize: 18,
+    fontWeight: 'bold',
+    marginTop: 20,
+    color: '#333',
+  },
+  voiceItem: {
+    padding: 10,
+    borderRadius: 5,
+    marginBottom: 10,
     width: '100%',
+    backgroundColor: '#f0f0f0',
+  },
+  selectedVoiceItem: {
+    backgroundColor: '#d0d0d0',
+  },
+  voiceItemText: {
+    fontSize: 16,
+    color: '#333',
   },
 });
 
